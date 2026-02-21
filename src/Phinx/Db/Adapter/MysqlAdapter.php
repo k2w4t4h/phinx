@@ -1564,4 +1564,105 @@ class MysqlAdapter extends PdoAdapter
 
         return $this->decoratedConnection = $this->buildConnection(MysqlDriver::class, $options);
     }
+
+    /**
+     * Executes all the ALTER TABLE instructions passed for the given table via Percona Toolkit
+     *
+     * @param string $tableName The table name to use in the ALTER statement
+     * @param \Phinx\Db\Util\AlterInstructions $instructions The object containing the alter sequence
+     * @return void
+     */
+    protected function executeAlterSteps(string $tableName, AlterInstructions $instructions): void
+    {
+        $alterParts = $instructions->getAlterParts();
+
+        if (!empty($alterParts)) {
+            $alterString = implode(', ', $alterParts);
+            $this->executePtOnlineSchemaChange($tableName, $alterString);
+        }
+
+        // Execute post steps
+        $state = [];
+        foreach ($instructions->getPostSteps() as $instruction) {
+            if (is_callable($instruction)) {
+                $state = $instruction($state);
+                continue;
+            }
+
+            // Check if post step is an ALTER TABLE query
+            if (is_string($instruction) && preg_match('/^\s*ALTER\s+TABLE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?\s+(.+)$/i', $instruction, $matches)) {
+                $this->executePtOnlineSchemaChange($tableName, $matches[1]);
+            } else {
+                $this->execute($instruction);
+            }
+        }
+    }
+
+    /**
+     * Executes an ALTER via Percona Toolkit's pt-online-schema-change
+     *
+     * @param string $tableName The table name
+     * @param string $alterString The alter statement parts (e.g. "ADD COLUMN ...")
+     * @return void
+     * @throws \RuntimeException
+     */
+    protected function executePtOnlineSchemaChange(string $tableName, string $alterString): void
+    {
+        $options = $this->getOptions();
+        $host = $options['host'] ?? 'localhost';
+        $port = $options['port'] ?? 3306;
+        $user = $options['user'] ?? '';
+        $pass = $options['pass'] ?? '';
+        $name = $options['name'] ?? '';
+
+        $cmdParts = [
+            'pt-online-schema-change',
+            '--alter', escapeshellarg($alterString),
+            '--execute'
+        ];
+
+        if ($host) {
+            $cmdParts[] = '--host=' . escapeshellarg((string)$host);
+        }
+        if ($port) {
+            $cmdParts[] = '--port=' . escapeshellarg((string)$port);
+        }
+        if ($user) {
+            $cmdParts[] = '--user=' . escapeshellarg((string)$user);
+        }
+        if ($pass) {
+            $cmdParts[] = '--password=' . escapeshellarg((string)$pass);
+        }
+
+        $dsnParts = [];
+        if ($name) {
+            $dsnParts[] = "D=" . $name;
+        }
+        $dsnParts[] = "t=" . $tableName;
+        
+        $cmdParts[] = escapeshellarg(implode(',', $dsnParts));
+
+        $cmd = implode(' ', $cmdParts);
+
+        $safeCmd = preg_replace('/--password=\S+/', '--password=***', $cmd);
+        $this->getOutput()->writeln(sprintf('<info>Executing ALTER via pt-online-schema-change:</info> %s', $safeCmd));
+
+        $output = [];
+        $returnVar = 0;
+        
+        exec($cmd . ' 2>&1', $output, $returnVar);
+
+        foreach ($output as $line) {
+            $this->getOutput()->writeln(sprintf('  <comment>%s</comment>', $line));
+        }
+
+        if ($returnVar !== 0) {
+            throw new \RuntimeException(sprintf(
+                "pt-online-schema-change failed with exit code %d:\nCommand: %s\nOutput:\n%s",
+                $returnVar,
+                $safeCmd,
+                implode("\n", $output)
+            ));
+        }
+    }
 }
