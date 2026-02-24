@@ -1566,6 +1566,22 @@ class MysqlAdapter extends PdoAdapter
     }
 
     /**
+     * @inheritDoc
+     */
+    public function execute(string $sql, array $params = []): int
+    {
+        $sql = rtrim($sql, "; \t\n\r\0\x0B");
+
+        if (preg_match('/^\s*ALTER\s+TABLE\s+[`\'"]?([a-zA-Z0-9_]+)[`\'"]?\s+(.+)$/is', $sql, $matches)) {
+            $this->executePtOnlineSchemaChange($matches[1], $matches[2]);
+
+            return 0;
+        }
+
+        return parent::execute($sql, $params);
+    }
+
+    /**
      * Executes all the ALTER TABLE instructions passed for the given table via Percona Toolkit
      *
      * @param string $tableName The table name to use in the ALTER statement
